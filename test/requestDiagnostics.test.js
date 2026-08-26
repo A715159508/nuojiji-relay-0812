@@ -39,6 +39,21 @@ test('reports data URL metadata and hash without the Base64 body', async () => {
     assert.equal(JSON.stringify(diagnostic).includes(block.slice(0, 100)), false);
 });
 
+test('reports JSON field paths and sizes without values', async () => {
+    const privateValue = 'secret-value-'.repeat(100);
+    const diagnostic = await buildGenerateDiagnostic({
+        requestId: 'req-json',
+        rawBodyBytes: 999,
+        messages: [{ role: 'system', content: JSON.stringify({ persona: privateValue, items: ['x', 'y'] }) }],
+    });
+    const structure = diagnostic.largestSystemAnalysis.jsonStructure;
+    assert.equal(structure.parseable, true);
+    assert.equal(structure.largestStrings[0].path, '$.persona');
+    assert.equal(structure.largestStrings[0].chars, privateValue.length);
+    assert.equal(structure.largestArrays[0].path, '$.items');
+    assert.equal(JSON.stringify(diagnostic).includes(privateValue), false);
+});
+
 test('reports only safe AI error metadata', () => {
     const error = new Error('private upstream response');
     error.status = 400;

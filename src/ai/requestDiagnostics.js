@@ -94,6 +94,111 @@ function repeatStats(text) {
     };
 }
 
+function shiftedRepeatStats(text) {
+    const size = 256;
+    const stride = 128;
+    const counts = new Map();
+    let total = 0;
+    for (let i = 0; i + size <= text.length; i += stride) {
+        const hash = fnv1a(text.slice(i, i + size));
+        counts.set(hash, (counts.get(hash) || 0) + 1);
+        total++;
+    }
+    let repeated = 0;
+    let maxSameWindowCount = 0;
+    for (const count of counts.values()) {
+        if (count > 1) repeated += count - 1;
+        if (count > maxSameWindowCount) maxSameWindowCount = count;
+    }
+    return {
+        windowChars: size,
+        strideChars: stride,
+        totalWindows: total,
+        repeatedWindows: repeated,
+        repeatedWindowRate: total ? Number((repeated / total).toFixed(6)) : 0,
+        maxSameWindowCount,
+    };
+}
+
+function safePathKey(key) {
+    return /^[A-Za-z_$][A-Za-z0-9_$.-]{0,63}$/.test(key)
+        ? key
+        : `<key#${fnv1a(key).toString(16).padStart(8, '0')}>`;
+}
+
+async function jsonStructureStats(text) {
+    let root;
+    try { root = JSON.parse(text); } catch { return { parseable: false }; }
+    const stack = [{ value: root, path: '$' }];
+    const strings = [];
+    const arrays = [];
+    const topLevelKeys = root && typeof root === 'object' && !Array.isArray(root)
+        ? Object.keys(root).slice(0, 100).map(safePathKey)
+        : [];
+    let visitedNodes = 0;
+    while (stack.length && visitedNodes < 100_000) {
+        const { value, path } = stack.pop();
+        visitedNodes++;
+        if (typeof value === 'string') {
+            strings.push({ path, value });
+            continue;
+        }
+        if (!value || typeof value !== 'object') continue;
+        if (Array.isArray(value)) {
+            arrays.push({ path, length: value.length });
+            for (let i = value.length - 1; i >= 0; i--) stack.push({ value: value[i], path: `${path}[${i}]` });
+        } else {
+            const entries = Object.entries(value);
+            for (let i = entries.length - 1; i >= 0; i--) {
+                const [key, child] = entries[i];
+                stack.push({ value: child, path: `${path}.${safePathKey(key)}` });
+            }
+        }
+    }
+    strings.sort((a, b) => b.value.length - a.value.length);
+    arrays.sort((a, b) => b.length - a.length);
+    const largestStrings = [];
+    for (const item of strings.slice(0, 12)) {
+        const ascii = inspectRuns(item.value).asciiChars;
+        largestStrings.push({
+            path: item.path.slice(0, 512),
+            chars: item.value.length,
+            bytes: utf8Bytes(item.value),
+            asciiRate: item.value.length ? Number((ascii / item.value.length).toFixed(6)) : 0,
+            sha256: await sha256(item.value),
+        });
+    }
+    return {
+        parseable: true,
+        rootType: Array.isArray(root) ? 'array' : typeof root,
+        topLevelKeys,
+        visitedNodes,
+        traversalTruncated: stack.length > 0,
+        stringLeafCount: strings.length,
+        largestStrings,
+        largestArrays: arrays.slice(0, 12),
+    };
+}
+
+async function sampledGzipStats(text) {
+    if (typeof CompressionStream !== 'function') return { supported: false };
+    const part = Math.min(350_000, Math.floor(text.length / 3));
+    const sample = text.length <= part * 3
+        ? text
+        : text.slice(0, part) + text.slice(Math.floor((text.length - part) / 2), Math.floor((text.length + part) / 2)) + text.slice(-part);
+    const compressed = await new Response(
+        new Blob([sample]).stream().pipeThrough(new CompressionStream('gzip')),
+    ).arrayBuffer();
+    const inputBytes = utf8Bytes(sample);
+    return {
+        supported: true,
+        sampledChars: sample.length,
+        sampledBytes: inputBytes,
+        gzipBytes: compressed.byteLength,
+        gzipRatio: inputBytes ? Number((compressed.byteLength / inputBytes).toFixed(6)) : 0,
+    };
+}
+
 async function analyzeSystemContent(text, messageIndex) {
     const lower = text.toLowerCase();
     const runs = inspectRuns(text);
@@ -155,6 +260,9 @@ async function analyzeSystemContent(text, messageIndex) {
         serializedFieldCounts,
         looksJsonStringified: /^\s*[\[{]/.test(text) && /["'][^"']+["']\s*:/.test(text),
         repetition: repeatStats(text),
+        shiftedRepetition: shiftedRepeatStats(text),
+        jsonStructure: await jsonStructureStats(text),
+        sampledGzip: await sampledGzipStats(text),
     };
 }
 
