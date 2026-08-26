@@ -3,6 +3,11 @@ main = "worker.js"
 compatibility_date = "2024-09-23"
 compatibility_flags = ["nodejs_compat"]
 
+# Persist privacy-safe diagnostic console logs across Git-based deployments.
+[observability]
+enabled = true
+head_sampling_rate = 1
+
 # Outbox + 推送订阅存这个 KV namespace。
 # ⭐ 不写 id：用「Deploy to Cloudflare」一键部署 / wrangler deploy 时会【自动创建】并绑定，
 #    用户零操作（CF 2025 自动资源 provisioning）。
