@@ -1,6 +1,12 @@
 const utf8Bytes = (value) => new TextEncoder().encode(value).byteLength;
 const BASE64_MIN_REPORT_CHARS = 1_000_000;
 const REPEAT_CHUNK_CHARS = 2048;
+const FINGERPRINT_CHUNK_CHARS = 64 * 1024;
+const STRUCTURE_KEYS = [
+    'messages', 'role', 'content', 'system', 'prompt', 'character', 'persona',
+    'memory', 'worldbook', 'lorebook', 'history', 'context', 'state', 'data',
+    'embedding', 'vector', 'token',
+];
 
 function contentText(content) {
     if (typeof content === 'string') return content;
@@ -202,6 +208,275 @@ async function sampledGzipStats(text) {
     };
 }
 
+function ratio(value, total) {
+    return total ? Number((value / total).toFixed(6)) : 0;
+}
+
+function countMatches(text, expression) {
+    let count = 0;
+    expression.lastIndex = 0;
+    while (expression.exec(text)) count++;
+    return count;
+}
+
+function charClass(value) {
+    if (!value) return 'boundary';
+    if (/\s/.test(value)) return 'whitespace';
+    if (/[A-Za-z]/.test(value)) return 'letter';
+    if (/[0-9]/.test(value)) return 'digit';
+    if ('{}[]()'.includes(value)) return 'bracket';
+    if ('\"\':,.-\\\\'.includes(value)) return 'punctuation';
+    if (value.charCodeAt(0) <= 0x7f) return 'other_ascii';
+    return 'non_ascii';
+}
+
+function parseFailureStats(text) {
+    try {
+        JSON.parse(text);
+        return { parseable: true, offset: null };
+    } catch (error) {
+        const message = String(error?.message || '');
+        const match = message.match(/(?:position|at position)\s+(\d+)/i)
+            || message.match(/at\s+(\d+)\s*$/i);
+        const offset = match ? Number(match[1]) : null;
+        return {
+            parseable: false,
+            offset,
+            locationTypes: offset == null ? null : {
+                before16: Array.from(text.slice(Math.max(0, offset - 16), offset)).map(charClass),
+                at: charClass(text[offset]),
+                after16: Array.from(text.slice(offset + 1, offset + 17)).map(charClass),
+            },
+        };
+    }
+}
+
+async function gzipRatioFor(text) {
+    if (typeof CompressionStream !== 'function') return null;
+    const inputBytes = utf8Bytes(text);
+    const compressed = await new Response(
+        new Blob([text]).stream().pipeThrough(new CompressionStream('gzip')),
+    ).arrayBuffer();
+    return ratio(compressed.byteLength, inputBytes);
+}
+
+function bracketAndNumericStats(text) {
+    const stack = [];
+    const totals = { curlyOpen: 0, curlyClose: 0, squareOpen: 0, squareClose: 0 };
+    const completedTopLevel = [];
+    const numericArrays = [];
+    let mismatches = 0;
+    let firstMismatchOffset = null;
+    let maxEstimatedDepth = 0;
+    let inString = false;
+    let escaped = false;
+
+    for (let i = 0; i < text.length; i++) {
+        const ch = text[i];
+        if (inString) {
+            if (escaped) escaped = false;
+            else if (ch === '\\') escaped = true;
+            else if (ch === '"') inString = false;
+            continue;
+        }
+        if (ch === '"') { inString = true; continue; }
+        if (ch === '{' || ch === '[') {
+            if (ch === '{') totals.curlyOpen++; else totals.squareOpen++;
+            stack.push({
+                type: ch,
+                start: i,
+                topLevel: stack.length === 0,
+                numberCount: 0,
+                commaCount: 0,
+                disqualifying: 0,
+            });
+            if (stack.length > maxEstimatedDepth) maxEstimatedDepth = stack.length;
+            continue;
+        }
+        if (ch === '}' || ch === ']') {
+            if (ch === '}') totals.curlyClose++; else totals.squareClose++;
+            const expected = ch === '}' ? '{' : '[';
+            const frame = stack[stack.length - 1];
+            if (!frame || frame.type !== expected) {
+                mismatches++;
+                if (firstMismatchOffset == null) firstMismatchOffset = i;
+                continue;
+            }
+            stack.pop();
+            if (frame.type === '[' && frame.numberCount >= 16
+                && frame.disqualifying <= Math.max(2, Math.floor(frame.numberCount * 0.02))) {
+                numericArrays.push({
+                    start: frame.start,
+                    end: i + 1,
+                    length: i + 1 - frame.start,
+                    numberCount: frame.numberCount,
+                    commaCount: frame.commaCount,
+                });
+            }
+            if (frame.topLevel && completedTopLevel.length < 20) {
+                completedTopLevel.push({ start: frame.start, end: i + 1, type: frame.type === '{' ? 'object' : 'array' });
+            }
+            continue;
+        }
+        let arrayFrame = null;
+        for (let j = stack.length - 1; j >= 0; j--) {
+            if (stack[j].type === '[') { arrayFrame = stack[j]; break; }
+        }
+        if (!arrayFrame) continue;
+        if (ch === ',') { arrayFrame.commaCount++; continue; }
+        if (/\s/.test(ch)) continue;
+        if (/[+\-.0-9eE]/.test(ch)) {
+            const match = text.slice(i).match(/^[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?/);
+            if (match) {
+                arrayFrame.numberCount++;
+                i += match[0].length - 1;
+                continue;
+            }
+        }
+        if (ch !== '[' && ch !== ']') arrayFrame.disqualifying++;
+    }
+    numericArrays.sort((a, b) => b.numberCount - a.numberCount || b.length - a.length);
+    return {
+        ...totals,
+        maxEstimatedDepth,
+        mismatches,
+        firstMismatchOffset,
+        unclosedCount: stack.length,
+        balanced: mismatches === 0 && stack.length === 0
+            && totals.curlyOpen === totals.curlyClose && totals.squareOpen === totals.squareClose,
+        completedTopLevel,
+        numericArrays: numericArrays.slice(0, 12),
+    };
+}
+
+async function structureFingerprint(text) {
+    const length = text.length;
+    const counts = {
+        letters: 0, digits: 0, whitespace: 0, spaces: 0, newlines: 0,
+        curlyOpen: 0, curlyClose: 0, squareOpen: 0, squareClose: 0,
+        parenOpen: 0, parenClose: 0, quote: 0, colon: 0, comma: 0,
+        dot: 0, hyphen: 0, backslash: 0, ascii: 0, punctuation: 0,
+    };
+    const structural = '{}[]():,".-\\';
+    for (let i = 0; i < length; i++) {
+        const ch = text[i];
+        const code = text.charCodeAt(i);
+        if (code <= 0x7f) counts.ascii++;
+        if (/[A-Za-z]/.test(ch)) counts.letters++;
+        else if (/[0-9]/.test(ch)) counts.digits++;
+        if (/\s/.test(ch)) counts.whitespace++;
+        if (ch === ' ') counts.spaces++;
+        if (ch === '\n' || ch === '\r') counts.newlines++;
+        if (ch === '{') counts.curlyOpen++; else if (ch === '}') counts.curlyClose++;
+        else if (ch === '[') counts.squareOpen++; else if (ch === ']') counts.squareClose++;
+        else if (ch === '(') counts.parenOpen++; else if (ch === ')') counts.parenClose++;
+        else if (ch === '"') counts.quote++; else if (ch === ':') counts.colon++;
+        else if (ch === ',') counts.comma++; else if (ch === '.') counts.dot++;
+        else if (ch === '-') counts.hyphen++; else if (ch === '\\') counts.backslash++;
+        if (structural.includes(ch)) counts.punctuation++;
+    }
+    const ratios = Object.fromEntries(Object.entries(counts).map(([key, value]) => [key, ratio(value, length)]));
+    const escapes = {
+        unicode: countMatches(text, /\\u[0-9a-fA-F]{4}/g),
+        hex: countMatches(text, /\\x[0-9a-fA-F]{2}/g),
+        escapedNewline: countMatches(text, /\\n/g),
+        escapedReturn: countMatches(text, /\\r/g),
+        escapedTab: countMatches(text, /\\t/g),
+        percentHex: countMatches(text, /%[0-9a-fA-F]{2}/g),
+        htmlNumericEntity: countMatches(text, /&#(?:\d+|x[0-9a-fA-F]+);/g),
+        htmlNamedEntity: countMatches(text, /&[A-Za-z][A-Za-z0-9]{1,31};/g),
+    };
+    const keyCounts = {};
+    for (const key of STRUCTURE_KEYS) {
+        keyCounts[key] = countMatches(text, new RegExp(`['"]${key}['"]\\s*:`, 'gi'));
+    }
+    const brackets = bracketAndNumericStats(text);
+    const boundaries = [];
+    for (const item of brackets.completedTopLevel.slice(0, 12)) {
+        const content = text.slice(item.start, item.end);
+        boundaries.push({ ...item, length: item.end - item.start, sha256: await sha256(content) });
+    }
+    const firstBoundary = brackets.completedTopLevel[0] || null;
+    const trailingNonWhitespace = firstBoundary
+        ? text.slice(firstBoundary.end).search(/\S/)
+        : -1;
+
+    const chunks = [];
+    for (let start = 0; start < length; start += FINGERPRINT_CHUNK_CHARS) {
+        const chunk = text.slice(start, Math.min(length, start + FINGERPRINT_CHUNK_CHARS));
+        let ascii = 0; let digits = 0; let punctuation = 0; let jsonMarks = 0;
+        for (let i = 0; i < chunk.length; i++) {
+            const ch = chunk[i];
+            if (chunk.charCodeAt(i) <= 0x7f) ascii++;
+            if (/[0-9]/.test(ch)) digits++;
+            if (structural.includes(ch)) punctuation++;
+            if ('{}[]":,'.includes(ch)) jsonMarks++;
+        }
+        chunks.push({
+            index: chunks.length,
+            start,
+            length: chunk.length,
+            asciiRatio: ratio(ascii, chunk.length),
+            digitRatio: ratio(digits, chunk.length),
+            punctuationRatio: ratio(punctuation, chunk.length),
+            jsonStyleRatio: ratio(jsonMarks, chunk.length),
+            gzipRatio: await gzipRatioFor(chunk),
+        });
+    }
+    const metrics = ['asciiRatio', 'digitRatio', 'punctuationRatio', 'jsonStyleRatio', 'gzipRatio'];
+    const chunkRanges = {};
+    for (const metric of metrics) {
+        const values = chunks.map((chunk) => chunk[metric]).filter((value) => value != null);
+        chunkRanges[metric] = values.length ? {
+            min: Math.min(...values), max: Math.max(...values), spread: Number((Math.max(...values) - Math.min(...values)).toFixed(6)),
+        } : null;
+    }
+    const largestNumeric = brackets.numericArrays[0] || null;
+    const numericArrayFingerprints = [];
+    for (const item of brackets.numericArrays.slice(0, 5)) {
+        numericArrayFingerprints.push({
+            ...item,
+            sha256: await sha256(text.slice(item.start, item.end)),
+        });
+    }
+    return {
+        chars: length,
+        counts,
+        ratios,
+        escapes,
+        keyCounts,
+        parseFailure: parseFailureStats(text),
+        brackets: {
+            curlyOpen: brackets.curlyOpen, curlyClose: brackets.curlyClose,
+            squareOpen: brackets.squareOpen, squareClose: brackets.squareClose,
+            balanced: brackets.balanced, mismatches: brackets.mismatches,
+            firstMismatchOffset: brackets.firstMismatchOffset,
+            unclosedCount: brackets.unclosedCount,
+            maxEstimatedDepth: brackets.maxEstimatedDepth,
+        },
+        concatenation: {
+            completedTopLevelCount: brackets.completedTopLevel.length,
+            multipleJsonLikeSegments: brackets.completedTopLevel.length > 1,
+            jsonLikeThenTrailingText: Boolean(firstBoundary && trailingNonWhitespace >= 0),
+            firstTrailingNonWhitespaceOffset: firstBoundary && trailingNonWhitespace >= 0
+                ? firstBoundary.end + trailingNonWhitespace : null,
+            boundaries,
+        },
+        numericData: {
+            numericArrayCount: brackets.numericArrays.length,
+            largestNumberCount: largestNumeric?.numberCount || 0,
+            largestArrayChars: largestNumeric?.length || 0,
+            likelyVectorLike: Boolean(largestNumeric && largestNumeric.numberCount >= 128),
+            likelyTokenIds: Boolean(largestNumeric && largestNumeric.numberCount >= 128
+                && counts.dot < Math.max(1, counts.digits * 0.01)),
+            fingerprints: numericArrayFingerprints,
+        },
+        chunkChars: FINGERPRINT_CHUNK_CHARS,
+        chunkRanges,
+        chunks,
+    };
+}
+
 async function analyzeSystemContent(text, messageIndex) {
     const lower = text.toLowerCase();
     const runs = inspectRuns(text);
@@ -266,6 +541,7 @@ async function analyzeSystemContent(text, messageIndex) {
         shiftedRepetition: shiftedRepeatStats(text),
         jsonStructure: await jsonStructureStats(text),
         sampledGzip: await sampledGzipStats(text),
+        structureFingerprint: await structureFingerprint(text),
     };
 }
 
