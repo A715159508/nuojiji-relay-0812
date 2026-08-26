@@ -2,8 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { buildGenerateDiagnostic, buildAiResultDiagnostic } from '../src/ai/requestDiagnostics.js';
 
-test('reports UTF-8 sizes without including message content', () => {
-    const diagnostic = buildGenerateDiagnostic({
+test('reports UTF-8 sizes without including message content', async () => {
+    const diagnostic = await buildGenerateDiagnostic({
         requestId: 'req-1',
         rawBodyBytes: 321,
         messages: [
@@ -21,6 +21,22 @@ test('reports UTF-8 sizes without including message content', () => {
     assert.equal(diagnostic.systemChars, 3);
     assert.equal(diagnostic.systemBytes, 9);
     assert.equal(JSON.stringify(diagnostic).includes('人设一'), false);
+});
+
+test('reports data URL metadata and hash without the Base64 body', async () => {
+    const block = 'iVBORw0KGgo' + 'A'.repeat(1_000_100);
+    const diagnostic = await buildGenerateDiagnostic({
+        requestId: 'req-base64',
+        rawBodyBytes: block.length,
+        messages: [{ role: 'system', content: `{"avatar":"data:image/png;base64,${block}"}` }],
+    });
+    const analysis = diagnostic.largestSystemAnalysis;
+    assert.equal(analysis.markers.dataImage, true);
+    assert.equal(analysis.millionScaleBase64, true);
+    assert.equal(analysis.base64Blocks[0].prefixType, 'image/png');
+    assert.equal(analysis.base64Blocks[0].imageSignature, 'png');
+    assert.equal(analysis.base64Blocks[0].sha256.length, 64);
+    assert.equal(JSON.stringify(diagnostic).includes(block.slice(0, 100)), false);
 });
 
 test('reports only safe AI error metadata', () => {

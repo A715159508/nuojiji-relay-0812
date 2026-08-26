@@ -109,7 +109,7 @@ export function createApp() {
         if (!requestId || !inboxId || !Array.isArray(messages) || !settings) {
             return c.json({ error: 'requestId / inboxId / messages / settings required' }, 400);
         }
-        console.log(`[relay-diag] ${JSON.stringify(buildGenerateDiagnostic({ requestId, rawBodyBytes, messages }))}`);
+        console.log(`[relay-diag] ${JSON.stringify(await buildGenerateDiagnostic({ requestId, rawBodyBytes, messages }))}`);
 
         const { outbox, sub } = await getStores(c.env);
 
