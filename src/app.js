@@ -17,6 +17,7 @@ import { createSubStore, subKey } from './store/subStore.js';
 import { createProactiveStore, PROACTIVE_WINDOW_CAP } from './store/proactiveStore.js';
 import { createKvStore } from './store/kvStore.js';
 import { runGeneration } from './ai/aiCaller.js';
+import { buildGenerateDiagnostic, buildAiResultDiagnostic } from './ai/requestDiagnostics.js';
 import { dispatchPush } from './push/pushSender.js';
 import { getVapidPublicKey } from './push/webPush.js';
 import { makeMessageId, nowMs, extractPushBodies } from './util/ids.js';
@@ -95,12 +96,20 @@ export function createApp() {
     app.use('/proactive/*', requireSecret);
 
     app.post('/generate', async (c) => {
+        let rawBody;
         let body;
-        try { body = await c.req.json(); } catch { return c.json({ error: 'invalid json' }, 400); }
+        let rawBodyBytes = 0;
+        try {
+            rawBody = await c.req.text();
+            rawBodyBytes = new TextEncoder().encode(rawBody).byteLength;
+            body = JSON.parse(rawBody);
+            rawBody = null;
+        } catch { return c.json({ error: 'invalid json' }, 400); }
         const { requestId, inboxId, messages, settings, maxTokens, meta } = body || {};
         if (!requestId || !inboxId || !Array.isArray(messages) || !settings) {
             return c.json({ error: 'requestId / inboxId / messages / settings required' }, 400);
         }
+        console.log(`[relay-diag] ${JSON.stringify(buildGenerateDiagnostic({ requestId, rawBodyBytes, messages }))}`);
 
         const { outbox, sub } = await getStores(c.env);
 
@@ -127,12 +136,14 @@ export function createApp() {
         let item;
         try {
             const content = await runGeneration(settings, messages, maxTokens);
+            console.log(`[relay-diag] ${JSON.stringify(buildAiResultDiagnostic(requestId))}`);
             item = {
                 id, requestId,
                 charId: meta?.charId ?? null, roundId: meta?.roundId ?? null, userId: meta?.userId ?? null,
                 content, error: null, createdAt: nowMs(),
             };
         } catch (e) {
+            console.warn(`[relay-diag] ${JSON.stringify(buildAiResultDiagnostic(requestId, e))}`);
             item = {
                 id, requestId,
                 charId: meta?.charId ?? null, roundId: meta?.roundId ?? null, userId: meta?.userId ?? null,

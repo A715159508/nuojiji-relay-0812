@@ -32,6 +32,13 @@ async function callOnce({ apiUrl, apiKey, model, apiType, messages, temperature,
             const errText = await res.text().catch(() => '');
             const err = new Error(`AI HTTP ${res.status}: ${errText.slice(0, 500)}`);
             err.status = res.status;
+            try {
+                const parsed = JSON.parse(errText);
+                const upstream = parsed?.error || parsed;
+                err.upstreamErrorType = upstream?.type || upstream?.code || parsed?.type || parsed?.code || `http_${res.status}`;
+            } catch {
+                err.upstreamErrorType = `http_${res.status}`;
+            }
             throw err;
         }
 
