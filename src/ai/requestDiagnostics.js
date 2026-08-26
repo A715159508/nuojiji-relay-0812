@@ -129,16 +129,18 @@ function safePathKey(key) {
 async function jsonStructureStats(text) {
     let root;
     try { root = JSON.parse(text); } catch { return { parseable: false }; }
-    const stack = [{ value: root, path: '$' }];
+    const stack = [{ value: root, path: '$', depth: 0 }];
     const strings = [];
     const arrays = [];
     const topLevelKeys = root && typeof root === 'object' && !Array.isArray(root)
         ? Object.keys(root).slice(0, 100).map(safePathKey)
         : [];
     let visitedNodes = 0;
+    let maxDepth = 0;
     while (stack.length && visitedNodes < 100_000) {
-        const { value, path } = stack.pop();
+        const { value, path, depth } = stack.pop();
         visitedNodes++;
+        if (depth > maxDepth) maxDepth = depth;
         if (typeof value === 'string') {
             strings.push({ path, value });
             continue;
@@ -146,12 +148,12 @@ async function jsonStructureStats(text) {
         if (!value || typeof value !== 'object') continue;
         if (Array.isArray(value)) {
             arrays.push({ path, length: value.length });
-            for (let i = value.length - 1; i >= 0; i--) stack.push({ value: value[i], path: `${path}[${i}]` });
+            for (let i = value.length - 1; i >= 0; i--) stack.push({ value: value[i], path: `${path}[${i}]`, depth: depth + 1 });
         } else {
             const entries = Object.entries(value);
             for (let i = entries.length - 1; i >= 0; i--) {
                 const [key, child] = entries[i];
-                stack.push({ value: child, path: `${path}.${safePathKey(key)}` });
+                stack.push({ value: child, path: `${path}.${safePathKey(key)}`, depth: depth + 1 });
             }
         }
     }
@@ -173,6 +175,7 @@ async function jsonStructureStats(text) {
         rootType: Array.isArray(root) ? 'array' : typeof root,
         topLevelKeys,
         visitedNodes,
+        maxDepth,
         traversalTruncated: stack.length > 0,
         stringLeafCount: strings.length,
         largestStrings,

@@ -51,6 +51,7 @@ test('reports JSON field paths and sizes without values', async () => {
     assert.equal(structure.largestStrings[0].path, '$.persona');
     assert.equal(structure.largestStrings[0].chars, privateValue.length);
     assert.equal(structure.largestArrays[0].path, '$.items');
+    assert.equal(structure.maxDepth, 2);
     assert.equal(JSON.stringify(diagnostic).includes(privateValue), false);
 });
 
