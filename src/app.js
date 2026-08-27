@@ -17,7 +17,7 @@ import { createSubStore, subKey } from './store/subStore.js';
 import { createProactiveStore, PROACTIVE_WINDOW_CAP } from './store/proactiveStore.js';
 import { createKvStore } from './store/kvStore.js';
 import { runGeneration } from './ai/aiCaller.js';
-import { buildGenerateEntryDiagnostic, buildGenerateDiagnostic, buildAiResultDiagnostic } from './ai/requestDiagnostics.js';
+import { buildGenerateEntryDiagnostic, buildMarkerOffsetDiagnostic, buildGenerateDiagnostic, buildAiResultDiagnostic } from './ai/requestDiagnostics.js';
 import { dispatchPush } from './push/pushSender.js';
 import { getVapidPublicKey } from './push/webPush.js';
 import { makeMessageId, nowMs, extractPushBodies } from './util/ids.js';
@@ -111,6 +111,8 @@ export function createApp() {
         }
         // Always leave cheap entry evidence before optional bounded structure diagnostics.
         console.log(`[relay-diag] ${JSON.stringify(buildGenerateEntryDiagnostic({ requestId, rawBodyBytes, messages }))}`);
+        const markerDiagnostic = buildMarkerOffsetDiagnostic({ requestId, messages });
+        if (markerDiagnostic) console.log(`[relay-diag] ${JSON.stringify(markerDiagnostic)}`);
         try {
             console.log(`[relay-diag] ${JSON.stringify(await buildGenerateDiagnostic({ requestId, rawBodyBytes, messages }))}`);
         } catch (error) {

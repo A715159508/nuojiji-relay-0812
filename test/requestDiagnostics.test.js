@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
     buildGenerateEntryDiagnostic,
+    buildMarkerOffsetDiagnostic,
     buildGenerateDiagnostic,
     buildAiResultDiagnostic,
 } from '../src/ai/requestDiagnostics.js';
@@ -18,6 +19,24 @@ test('entry diagnostic is immediate and excludes message content', () => {
     assert.equal(diagnostic.firstSystemChars, 3);
     assert.deepEqual(diagnostic.roles, ['system', 'user']);
     assert.equal(JSON.stringify(diagnostic).includes('人设一'), false);
+});
+
+test('marker diagnostic uses safe offsets and detects missing or duplicate markers', () => {
+    const content = `prefix诊断标记_A01middle诊断标记_A02tail诊断标记_A02诊断标记_A04`;
+    const diagnostic = buildMarkerOffsetDiagnostic({ requestId: 'markers', messages: [{ role: 'system', content }] });
+    assert.equal(diagnostic.event, 'generate_marker_offsets');
+    assert.equal(diagnostic.markers[0].firstOffset, 6);
+    assert.equal(diagnostic.markers[1].distanceFromPrevious, '诊断标记_A01middle'.length);
+    assert.equal(diagnostic.markers[1].count, 2);
+    assert.equal(diagnostic.markers[2].found, false);
+    assert.deepEqual(diagnostic.duplicated, ['诊断标记_A02']);
+    assert.ok(diagnostic.missing.includes('诊断标记_A03'));
+    assert.equal(JSON.stringify(diagnostic).includes('prefix'), false);
+    assert.equal(JSON.stringify(diagnostic).includes('middle'), false);
+});
+
+test('marker diagnostic is silent for ordinary requests', () => {
+    assert.equal(buildMarkerOffsetDiagnostic({ requestId: 'none', messages: [{ role: 'system', content: 'ordinary private prompt' }] }), null);
 });
 
 test('sampled structure diagnostic classifies vector-like JSON without leaking values', async () => {
