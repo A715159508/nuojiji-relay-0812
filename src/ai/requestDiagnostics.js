@@ -9,6 +9,8 @@ const STRUCTURE_KEYS = [
     'memory', 'worldbook', 'lorebook', 'history', 'context', 'state', 'data',
     'embedding', 'vector', 'token',
 ];
+const DIAGNOSTIC_MARKER_PREFIX = '诊断标记_A';
+const DIAGNOSTIC_MARKERS = Array.from({ length: 11 }, (_, index) => `${DIAGNOSTIC_MARKER_PREFIX}${String(index + 1).padStart(2, '0')}`);
 
 function contentText(content) {
     if (typeof content === 'string') return content;
@@ -48,6 +50,47 @@ export function buildGenerateEntryDiagnostic({ requestId, rawBodyBytes, messages
         rolesTruncated: list.length > 32,
         firstSystemIndex: system?.index ?? null,
         firstSystemChars: system?.content.length ?? 0,
+    };
+}
+
+// One forward-only scan. It logs marker positions only and never captures surrounding text.
+export function buildMarkerOffsetDiagnostic({ requestId, messages }) {
+    const system = firstSystem(messages);
+    if (!system) return null;
+
+    const text = system.content;
+    const hits = new Map(DIAGNOSTIC_MARKERS.map((marker) => [marker, []]));
+    let cursor = 0;
+    while (cursor < text.length) {
+        const offset = text.indexOf(DIAGNOSTIC_MARKER_PREFIX, cursor);
+        if (offset < 0) break;
+        const candidate = text.slice(offset, offset + DIAGNOSTIC_MARKER_PREFIX.length + 2);
+        if (hits.has(candidate)) hits.get(candidate).push(offset);
+        cursor = offset + DIAGNOSTIC_MARKER_PREFIX.length;
+    }
+
+    if (![...hits.values()].some((offsets) => offsets.length)) return null;
+    let previousExpectedOffset = null;
+    const markers = DIAGNOSTIC_MARKERS.map((marker) => {
+        const offsets = hits.get(marker);
+        const firstOffset = offsets[0] ?? null;
+        const distanceFromPrevious = firstOffset != null && previousExpectedOffset != null
+            ? firstOffset - previousExpectedOffset
+            : null;
+        if (firstOffset != null) previousExpectedOffset = firstOffset;
+        return { marker, found: firstOffset != null, count: offsets.length, firstOffset, distanceFromPrevious };
+    });
+    const observed = markers.filter((marker) => marker.found).map((marker) => marker.firstOffset);
+    return {
+        event: 'generate_marker_offsets',
+        timestamp: new Date().toISOString(),
+        requestId: safeRequestId(requestId),
+        systemIndex: system.index,
+        systemChars: text.length,
+        markers,
+        missing: markers.filter((marker) => !marker.found).map((marker) => marker.marker),
+        duplicated: markers.filter((marker) => marker.count > 1).map((marker) => marker.marker),
+        outOfOrder: observed.some((offset, index) => index > 0 && offset <= observed[index - 1]),
     };
 }
 
