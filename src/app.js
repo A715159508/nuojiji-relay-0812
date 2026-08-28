@@ -17,7 +17,7 @@ import { createSubStore, subKey } from './store/subStore.js';
 import { createProactiveStore, PROACTIVE_WINDOW_CAP } from './store/proactiveStore.js';
 import { createKvStore } from './store/kvStore.js';
 import { runGeneration } from './ai/aiCaller.js';
-import { buildGenerateEntryDiagnostic, buildMarkerOffsetDiagnostic, buildGenerateDiagnostic, buildAiResultDiagnostic } from './ai/requestDiagnostics.js';
+import { buildGenerateEntryDiagnostic, buildMarkerOffsetDiagnostic, buildPrePersonaFingerprintDiagnostic, buildGenerateDiagnostic, buildAiResultDiagnostic } from './ai/requestDiagnostics.js';
 import { dispatchPush } from './push/pushSender.js';
 import { getVapidPublicKey } from './push/webPush.js';
 import { makeMessageId, nowMs, extractPushBodies } from './util/ids.js';
@@ -113,6 +113,17 @@ export function createApp() {
         console.log(`[relay-diag] ${JSON.stringify(buildGenerateEntryDiagnostic({ requestId, rawBodyBytes, messages }))}`);
         const markerDiagnostic = buildMarkerOffsetDiagnostic({ requestId, messages });
         if (markerDiagnostic) console.log(`[relay-diag] ${JSON.stringify(markerDiagnostic)}`);
+        try {
+            const prePersonaDiagnostic = await buildPrePersonaFingerprintDiagnostic({ requestId, messages });
+            if (prePersonaDiagnostic) console.log(`[relay-diag] ${JSON.stringify(prePersonaDiagnostic)}`);
+        } catch (error) {
+            console.warn(`[relay-diag] ${JSON.stringify({
+                event: 'generate_prepersona_fingerprint_error',
+                timestamp: new Date().toISOString(),
+                requestId: String(requestId).slice(0, 128),
+                errorType: String(error?.name || 'Error').slice(0, 64),
+            })}`);
+        }
         try {
             console.log(`[relay-diag] ${JSON.stringify(await buildGenerateDiagnostic({ requestId, rawBodyBytes, messages }))}`);
         } catch (error) {

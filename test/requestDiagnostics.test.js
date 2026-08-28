@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
     buildGenerateEntryDiagnostic,
     buildMarkerOffsetDiagnostic,
+    buildPrePersonaFingerprintDiagnostic,
     buildGenerateDiagnostic,
     buildAiResultDiagnostic,
 } from '../src/ai/requestDiagnostics.js';
@@ -37,6 +38,33 @@ test('marker diagnostic uses safe offsets and detects missing or duplicate marke
 
 test('marker diagnostic is silent for ordinary requests', () => {
     assert.equal(buildMarkerOffsetDiagnostic({ requestId: 'none', messages: [{ role: 'system', content: 'ordinary private prompt' }] }), null);
+});
+
+test('pre-persona fingerprint locates marker persona without logging content', async () => {
+    const privatePrefix = 'PRIVATE-PREFIX '.repeat(500);
+    const content = `${privatePrefix}诊断标记_A01完整正文诊断标记_A11private suffix`;
+    const diagnostic = await buildPrePersonaFingerprintDiagnostic({
+        requestId: 'pre-marker', messages: [{ role: 'system', content }], budgetMs: 100,
+    });
+    assert.equal(diagnostic.profile, 'abnormal_marker');
+    assert.equal(diagnostic.prePersonaChars, privatePrefix.length);
+    assert.equal(diagnostic.personaFound, true);
+    assert.equal(diagnostic.completed, true);
+    assert.equal(JSON.stringify(diagnostic).includes('PRIVATE-PREFIX'), false);
+    assert.equal(JSON.stringify(diagnostic).includes('完整正文'), false);
+});
+
+test('pre-persona fingerprint obeys a tiny budget on 6.2M input', async () => {
+    const content = `${'function template rule { return context; } '.repeat(160_000).slice(0, 6_200_000)}诊断标记_A01正文诊断标记_A11`;
+    const started = performance.now();
+    const diagnostic = await buildPrePersonaFingerprintDiagnostic({
+        requestId: 'pre-large', messages: [{ role: 'system', content }], budgetMs: 1,
+    });
+    const elapsed = performance.now() - started;
+    assert.equal(diagnostic.profile, 'abnormal_marker');
+    assert.ok(diagnostic.sampledChars <= 48 * 4096);
+    assert.ok(elapsed < 100);
+    assert.equal(JSON.stringify(diagnostic).includes('正文'), false);
 });
 
 test('sampled structure diagnostic classifies vector-like JSON without leaking values', async () => {
