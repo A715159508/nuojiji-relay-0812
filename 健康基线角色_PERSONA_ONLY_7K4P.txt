@@ -1,0 +1,3 @@
+BASE_PERSONA_BEGIN_7K4P
+这是一个临时、无害的健康基线测试角色。
+BASE_PERSONA_END_7K4P

@@ -18,6 +18,7 @@ import { createProactiveStore, PROACTIVE_WINDOW_CAP } from './store/proactiveSto
 import { createKvStore } from './store/kvStore.js';
 import { runGeneration } from './ai/aiCaller.js';
 import { buildGenerateEntryDiagnostic, buildMarkerOffsetDiagnostic, buildPrePersonaFingerprintDiagnostic, buildGenerateDiagnostic, buildAiResultDiagnostic } from './ai/requestDiagnostics.js';
+import { buildPeripheralFingerprintDiagnostic, runHealthyBaselineDiagnostic } from './ai/baselineDiagnostics.js';
 import { dispatchPush } from './push/pushSender.js';
 import { getVapidPublicKey } from './push/webPush.js';
 import { makeMessageId, nowMs, extractPushBodies } from './util/ids.js';
@@ -111,6 +112,27 @@ export function createApp() {
         }
         // Always leave cheap entry evidence before optional bounded structure diagnostics.
         console.log(`[relay-diag] ${JSON.stringify(buildGenerateEntryDiagnostic({ requestId, rawBodyBytes, messages }))}`);
+        try {
+            const diagnosticSecret = c.env?.RELAY_SECRET || c.env?.AUTH_SECRET;
+            const peripheralDiagnostic = await buildPeripheralFingerprintDiagnostic({
+                requestId, messages, settings, maxTokens, diagnosticSecret,
+            });
+            if (peripheralDiagnostic) console.log(`[relay-diag] ${JSON.stringify(peripheralDiagnostic)}`);
+            const { kv } = await getStores(c.env);
+            const baselineDiagnostic = await runHealthyBaselineDiagnostic({
+                requestId, messages, settings, maxTokens, kv,
+                diagnosticSecret,
+                knownPeripheralFingerprint: peripheralDiagnostic?.peripheralFingerprint,
+            });
+            if (baselineDiagnostic) console.log(`[relay-diag] ${JSON.stringify(baselineDiagnostic)}`);
+        } catch (error) {
+            console.warn(`[relay-diag] ${JSON.stringify({
+                event: 'generate_healthy_baseline_compare_error',
+                timestamp: new Date().toISOString(),
+                requestId: String(requestId).slice(0, 128),
+                errorType: String(error?.name || 'Error').slice(0, 64),
+            })}`);
+        }
         const markerDiagnostic = buildMarkerOffsetDiagnostic({ requestId, messages });
         if (markerDiagnostic) console.log(`[relay-diag] ${JSON.stringify(markerDiagnostic)}`);
         try {
